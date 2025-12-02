@@ -1,0 +1,469 @@
+syntax = "proto3";
+
+package photosync;
+option go_package = "github.com/jmh-devel/photonic/internal/proto";
+
+import "google/protobuf/timestamp.proto";
+
+// PhotoSync service for distributed photo management
+service PhotoSync {
+  // Agent Management
+  rpc RegisterAgent(RegisterAgentRequest) returns (RegisterAgentResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc UpdateAgentStatus(UpdateAgentStatusRequest) returns (UpdateAgentStatusResponse);
+  
+  // Photo Discovery and Metadata
+  rpc DiscoverPhotos(DiscoverPhotosRequest) returns (DiscoverPhotosResponse);
+  rpc GetPhotoMetadata(GetPhotoMetadataRequest) returns (GetPhotoMetadataResponse);
+  rpc SyncPhotoMetadata(SyncPhotoMetadataRequest) returns (SyncPhotoMetadataResponse);
+  
+  // Binary Photo Transfer (Streaming)
+  rpc UploadPhoto(stream UploadPhotoRequest) returns (UploadPhotoResponse);
+  rpc DownloadPhoto(DownloadPhotoRequest) returns (stream DownloadPhotoResponse);
+  
+  // Batch Operations
+  rpc BatchSync(BatchSyncRequest) returns (BatchSyncResponse);
+  rpc GetSyncQueue(GetSyncQueueRequest) returns (GetSyncQueueResponse);
+  
+  // Status and Monitoring
+  rpc GetAgentStatus(GetAgentStatusRequest) returns (GetAgentStatusResponse);
+  rpc GetServerStats(GetServerStatsRequest) returns (GetServerStatsResponse);
+}
+
+// Agent Registration
+message RegisterAgentRequest {
+  string agent_id = 1;
+  string hostname = 2;
+  string platform = 3;
+  repeated string capabilities = 4;
+  AgentConfig config = 5;
+  string version = 6;
+}
+
+message RegisterAgentResponse {
+  bool success = 1;
+  string message = 2;
+  ServerConfig server_config = 3;
+  repeated string assigned_tasks = 4;
+}
+
+message AgentConfig {
+  repeated string photo_directories = 1;
+  string nfs_mount = 2;
+  int32 max_concurrent_uploads = 3;
+  int32 max_concurrent_downloads = 4;
+  int64 batch_size_bytes = 5;
+  int32 heartbeat_interval = 6;
+  bool enable_raw_processing = 7;
+  bool enable_metadata_extraction = 8;
+}
+
+message ServerConfig {
+  string server_id = 1;
+  repeated string preferred_formats = 2;
+  int64 max_file_size = 3;
+  int32 concurrent_limit = 4;
+  bool require_checksums = 5;
+}
+
+// Heartbeat and Status
+message HeartbeatRequest {
+  string agent_id = 1;
+  AgentStatus status = 2;
+  repeated TaskProgress task_progress = 3;
+}
+
+message HeartbeatResponse {
+  bool success = 1;
+  repeated TaskAssignment new_tasks = 2;
+  repeated string cancel_tasks = 3;
+  ServerStatus server_status = 4;
+}
+
+message AgentStatus {
+  enum Status {
+    UNKNOWN = 0;
+    IDLE = 1;
+    ACTIVE = 2;
+    BUSY = 3;
+    ERROR = 4;
+    MAINTENANCE = 5;
+  }
+  Status status = 1;
+  int32 active_uploads = 2;
+  int32 active_downloads = 3;
+  int64 bytes_uploaded = 4;
+  int64 bytes_downloaded = 5;
+  int32 queue_depth = 6;
+  string current_task = 7;
+  google.protobuf.Timestamp last_activity = 8;
+  repeated string errors = 9;
+}
+
+message TaskProgress {
+  string task_id = 1;
+  string task_type = 2;
+  float progress_percent = 3;
+  string status_message = 4;
+  int64 bytes_processed = 5;
+  int64 total_bytes = 6;
+}
+
+message UpdateAgentStatusRequest {
+  string agent_id = 1;
+  AgentStatus status = 2;
+}
+
+message UpdateAgentStatusResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+// Photo Discovery and Metadata
+message DiscoverPhotosRequest {
+  string agent_id = 1;
+  repeated string directories = 2;
+  bool recursive = 3;
+  bool include_raw = 4;
+  bool extract_metadata = 5;
+  google.protobuf.Timestamp since = 6;
+}
+
+message DiscoverPhotosResponse {
+  repeated PhotoInfo photos = 1;
+  int32 total_count = 2;
+  string scan_id = 3;
+}
+
+message PhotoInfo {
+  string file_path = 1;
+  string relative_path = 2;
+  int64 file_size = 3;
+  string checksum_sha256 = 4;
+  google.protobuf.Timestamp modified_time = 5;
+  google.protobuf.Timestamp created_time = 6;
+  PhotoMetadata metadata = 7;
+  string mime_type = 8;
+  bool is_raw = 9;
+  repeated string tags = 10;
+}
+
+message PhotoMetadata {
+  string camera_make = 1;
+  string camera_model = 2;
+  string lens_model = 3;
+  float focal_length = 4;
+  float aperture = 5;
+  string shutter_speed = 6;
+  int32 iso = 7;
+  int32 width = 8;
+  int32 height = 9;
+  google.protobuf.Timestamp capture_time = 10;
+  string color_space = 11;
+  float gps_latitude = 12;
+  float gps_longitude = 13;
+  string orientation = 14;
+  repeated string keywords = 15;
+  string description = 16;
+  int32 rating = 17;
+}
+
+message GetPhotoMetadataRequest {
+  string agent_id = 1;
+  repeated string file_paths = 2;
+  bool extract_exif = 3;
+  bool extract_xmp = 4;
+}
+
+message GetPhotoMetadataResponse {
+  repeated PhotoInfo photos = 1;
+  repeated string errors = 2;
+}
+
+message SyncPhotoMetadataRequest {
+  string agent_id = 1;
+  repeated PhotoInfo photos = 2;
+  SyncMode sync_mode = 3;
+}
+
+message SyncPhotoMetadataResponse {
+  repeated ConflictResolution conflicts = 1;
+  int32 synced_count = 2;
+  repeated string errors = 3;
+}
+
+enum SyncMode {
+  SYNC_MODE_UNKNOWN = 0;
+  CLIENT_WINS = 1;
+  SERVER_WINS = 2;
+  MERGE = 3;
+  ASK_USER = 4;
+  NEWEST_WINS = 5;
+}
+
+message ConflictResolution {
+  string file_path = 1;
+  ConflictType conflict_type = 2;
+  PhotoInfo client_version = 3;
+  PhotoInfo server_version = 4;
+  PhotoInfo resolved_version = 5;
+  string resolution_reason = 6;
+}
+
+enum ConflictType {
+  CONFLICT_TYPE_UNKNOWN = 0;
+  METADATA_MISMATCH = 1;
+  CHECKSUM_MISMATCH = 2;
+  TIMESTAMP_MISMATCH = 3;
+  SIZE_MISMATCH = 4;
+  BOTH_MODIFIED = 5;
+}
+
+// Binary Photo Transfer
+message UploadPhotoRequest {
+  oneof content {
+    UploadPhotoMeta meta = 1;
+    bytes chunk = 2;
+  }
+}
+
+message UploadPhotoMeta {
+  string agent_id = 1;
+  PhotoInfo photo_info = 2;
+  string upload_id = 3;
+  int64 total_size = 4;
+  int32 chunk_size = 5;
+  bool verify_checksum = 6;
+  UploadOptions options = 7;
+}
+
+message UploadOptions {
+  bool overwrite_existing = 1;
+  bool create_thumbnails = 2;
+  bool extract_metadata = 3;
+  string destination_path = 4;
+  repeated string tags = 5;
+  int32 compression_quality = 6;
+}
+
+message UploadPhotoResponse {
+  bool success = 1;
+  string message = 2;
+  string file_path = 3;
+  string checksum_sha256 = 4;
+  int64 bytes_received = 5;
+  float upload_time_seconds = 6;
+  repeated string generated_thumbnails = 7;
+}
+
+message DownloadPhotoRequest {
+  string agent_id = 1;
+  string file_path = 2;
+  string checksum_sha256 = 3;
+  DownloadOptions options = 4;
+}
+
+message DownloadOptions {
+  bool verify_checksum = 1;
+  int32 chunk_size = 2;
+  string format = 3;
+  int32 max_width = 4;
+  int32 max_height = 5;
+  int32 quality = 6;
+}
+
+message DownloadPhotoResponse {
+  oneof content {
+    DownloadPhotoMeta meta = 1;
+    bytes chunk = 2;
+  }
+}
+
+message DownloadPhotoMeta {
+  PhotoInfo photo_info = 1;
+  int64 total_size = 2;
+  int32 chunk_size = 3;
+  string checksum_sha256 = 4;
+}
+
+// Batch Operations
+message BatchSyncRequest {
+  string agent_id = 1;
+  string batch_id = 2;
+  repeated PhotoInfo photos = 3;
+  SyncMode sync_mode = 4;
+  BatchOptions options = 5;
+}
+
+message BatchOptions {
+  int32 max_concurrent_transfers = 1;
+  int64 max_batch_size_bytes = 2;
+  bool verify_checksums = 3;
+  bool create_thumbnails = 4;
+  bool extract_metadata = 5;
+  int32 retry_attempts = 6;
+  string destination_pattern = 7;
+}
+
+message BatchSyncResponse {
+  string batch_id = 1;
+  BatchStatus status = 2;
+  int32 total_photos = 3;
+  int32 completed_photos = 4;
+  int32 failed_photos = 5;
+  int64 total_bytes = 6;
+  int64 transferred_bytes = 7;
+  float progress_percent = 8;
+  repeated BatchError errors = 9;
+  google.protobuf.Timestamp started_at = 10;
+  google.protobuf.Timestamp estimated_completion = 11;
+}
+
+enum BatchStatus {
+  BATCH_STATUS_UNKNOWN = 0;
+  BATCH_QUEUED = 1;
+  BATCH_RUNNING = 2;
+  BATCH_COMPLETED = 3;
+  BATCH_FAILED = 4;
+  BATCH_CANCELLED = 5;
+  BATCH_PAUSED = 6;
+}
+
+message BatchError {
+  string file_path = 1;
+  string error_code = 2;
+  string error_message = 3;
+  bool retryable = 4;
+  int32 retry_count = 5;
+}
+
+message GetSyncQueueRequest {
+  string agent_id = 1;
+  int32 limit = 2;
+  string status_filter = 3;
+}
+
+message GetSyncQueueResponse {
+  repeated QueueItem queue_items = 1;
+  int32 total_count = 2;
+  QueueStats stats = 3;
+}
+
+message QueueItem {
+  string item_id = 1;
+  string agent_id = 2;
+  QueueItemType item_type = 3;
+  string file_path = 4;
+  int64 file_size = 5;
+  QueueItemStatus status = 6;
+  int32 priority = 7;
+  google.protobuf.Timestamp queued_at = 8;
+  google.protobuf.Timestamp started_at = 9;
+  int32 retry_count = 10;
+  string error_message = 11;
+}
+
+enum QueueItemType {
+  QUEUE_ITEM_TYPE_UNKNOWN = 0;
+  ITEM_UPLOAD = 1;
+  ITEM_DOWNLOAD = 2;
+  ITEM_METADATA_SYNC = 3;
+  ITEM_THUMBNAIL_GENERATION = 4;
+  ITEM_DELETION = 5;
+}
+
+enum QueueItemStatus {
+  QUEUE_ITEM_STATUS_UNKNOWN = 0;
+  ITEM_PENDING = 1;
+  ITEM_PROCESSING = 2;
+  ITEM_COMPLETED = 3;
+  ITEM_FAILED = 4;
+  ITEM_RETRYING = 5;
+}
+
+message QueueStats {
+  int32 pending_count = 1;
+  int32 processing_count = 2;
+  int32 completed_count = 3;
+  int32 failed_count = 4;
+  int64 total_bytes_pending = 5;
+  int64 total_bytes_processing = 6;
+  float average_processing_time = 7;
+}
+
+// Task Management
+message TaskAssignment {
+  string task_id = 1;
+  string task_type = 2;
+  TaskPriority priority = 3;
+  map<string, string> parameters = 4;
+  google.protobuf.Timestamp deadline = 5;
+}
+
+enum TaskPriority {
+  TASK_PRIORITY_UNKNOWN = 0;
+  LOW = 1;
+  NORMAL = 2;
+  HIGH = 3;
+  URGENT = 4;
+}
+
+// Status and Monitoring
+message GetAgentStatusRequest {
+  string agent_id = 1;
+  bool include_queue = 2;
+  bool include_metrics = 3;
+}
+
+message GetAgentStatusResponse {
+  AgentStatus status = 1;
+  repeated QueueItem queue_items = 2;
+  AgentMetrics metrics = 3;
+}
+
+message AgentMetrics {
+  google.protobuf.Timestamp start_time = 1;
+  int64 total_uploads = 2;
+  int64 total_downloads = 3;
+  int64 total_bytes_uploaded = 4;
+  int64 total_bytes_downloaded = 5;
+  int32 successful_operations = 6;
+  int32 failed_operations = 7;
+  float average_upload_speed = 8;
+  float average_download_speed = 9;
+  map<string, int64> operation_counts = 10;
+}
+
+message ServerStatus {
+  string server_id = 1;
+  google.protobuf.Timestamp start_time = 2;
+  int32 active_agents = 3;
+  int32 total_connections = 4;
+  int64 total_storage_used = 5;
+  int64 total_storage_available = 6;
+  float cpu_usage_percent = 7;
+  float memory_usage_percent = 8;
+  int32 active_transfers = 9;
+  float network_bandwidth_usage = 10;
+}
+
+message GetServerStatsRequest {
+  bool include_agents = 1;
+  bool include_queue_stats = 2;
+  google.protobuf.Timestamp since = 3;
+}
+
+message GetServerStatsResponse {
+  ServerStatus status = 1;
+  repeated AgentStatus agent_statuses = 2;
+  QueueStats queue_stats = 3;
+  repeated ServerMetric metrics = 4;
+}
+
+message ServerMetric {
+  string metric_name = 1;
+  double value = 2;
+  string unit = 3;
+  google.protobuf.Timestamp timestamp = 4;
+  map<string, string> labels = 5;
+}

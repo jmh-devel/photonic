@@ -1,0 +1,24 @@
+# Test data - large image files
+test-data/
+
+# Build artifacts
+photonic
+
+# Temporary output
+output/
+output.txt
+*.tmp
+
+# Logs
+logs/*.log
+logs/*.json
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.dbdarktable-config/
+darktable-config/
+.gocache

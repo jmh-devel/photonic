@@ -4,7 +4,43 @@
 **Project Type**: Standalone CLI/Container Tool  
 **Integration**: Feeds processed results into Adastra Art e-commerce platform  
 **Deployment**: RPM/DEB packages + Docker container  
-**Architecture**: Python-based with FFmpeg, OpenCV, and Linux imaging tools integration
+**Architecture**: Go-based with FFmpeg, OpenCV, and Linux imaging tools integration
+
+---
+
+## ✨ **RECENT ENHANCEMENTS**
+
+### **Enhanced Logging System**
+- Traditional timestamp format: `2025/11/28 19:XX:XX [LEVEL]`
+- Dual output: console and file (`./logs/` directory)
+- Progress tracking for long-running operations
+- Job completion tracking with timing metrics
+
+### **Performance Optimization**
+- Automatic tmpfs detection and utilization for temporary files
+- Memory-based processing for dramatic speed improvements
+- Intelligent fallback to regular disk when memory options unavailable
+- Configurable temporary directory usage
+
+### **Multi-Tool RAW Processing**
+- Intelligent fallback system: ImageMagick → Darktable → DCraw → RawTherapee
+- Tool availability detection and status reporting
+- User override capabilities via command-line flags
+- Comprehensive error handling with detailed logging
+
+---
+
+## 🧭 Golang-First Scaffold (current)
+
+- New Go CLI skeleton lives in `cmd/photonic` with modular packages under `internal/`.
+- Config loader reads `~/.config/photonic/config.json` or `PHOTONIC_CONFIG` (defaults baked in).
+- Concurrency-ready pipeline with worker pool (`internal/pipeline`), result channel, SQLite persistence (`internal/storage`), and handlers that call task runners for scan/timelapse/panoramic/stack.
+- Logging via stdlib `slog`; toggle text/json via config logging.format.
+- Build/test locally: `GOCACHE=$(pwd)/.gocache go test ./...` then `go build ./cmd/photonic`.
+- HTTP status endpoint: `photonic serve --addr :8080` exposes `/healthz` and `/jobs`.
+- Batch/scan helpers queue grouped work for automation; CLI waits on job completion with structured logs.
+- RAW processing scaffold with pluggable tools (darktable-cli/ImageMagick/dcraw/rawtherapee) and discovery via `photonic list-processors` plus smoke test via `photonic test-processor`.
+- Alignment scaffold with astro/panoramic/general processors (Hugin/align_image_stack placeholders) and CLI `photonic align --type <auto|astro|panoramic|general|timelapse> --quality <fast|normal|high|ultra> <images...>`.
 
 ---
 
@@ -55,6 +91,8 @@ docker run -d \
 # Access web interface at http://localhost:8080
 ```
 
+### TODO: conver to go module details since we're not using python as our core library / tooling
+
 #### **3. Integration Module (Tertiary)**
 ```python
 # Python API for integration with main platform
@@ -87,6 +125,16 @@ results = pipeline.auto_process(
 - **OpenDroneMap** - Advanced photogrammetry (optional)
 - **ImageMagick** - Batch operations, format support
 - **ExifRead** - Metadata extraction and analysis
+
+#### **Alignment & Registration Tools**
+- **Astrometry.net** - Plate solving for astronomical images
+- **SIRIL** - Astronomical image processing and alignment
+- **DeepSkyStacker** - Astrophotography stacking suite
+- **Astroalign** - Python astronomical image alignment
+- **OpenCV** - Feature detection, homography, registration
+- **ITK/SimpleITK** - Medical imaging registration algorithms
+- **Hugin Tools** - `align_image_stack` for precise alignment
+- **PTGui** - Professional panoramic alignment (commercial option)
 
 #### **Detection & Analysis**
 - **SIFT/ORB** - Feature detection for panoramic grouping
@@ -193,14 +241,40 @@ detection_config = {
 - [ ] **Phase Correlation** - Frequency domain registration
 - [ ] **Multi-Point Alignment** - Control points for complex distortions
 
+### **4️⃣ PHOTO ALIGNMENT SYSTEM**
+
+#### **Astrophotography Alignment**
+- [ ] **Star Detection** - Automatic star identification and cataloging
+- [ ] **Plate Solving** - Astrometry.net integration for precise positioning
+- [ ] **Sub-pixel Registration** - High-precision star alignment algorithms
+- [ ] **Distortion Correction** - Lens and atmospheric distortion compensation
+- [ ] **Drift Compensation** - Mount tracking error correction
+- [ ] **Reference Frame Selection** - Choose best image as alignment target
+
+#### **Panoramic Alignment**  
+- [ ] **Feature Matching** - SIFT/ORB/SURF keypoint detection and matching
+- [ ] **Homography Estimation** - Perspective transformation calculation
+- [ ] **Bundle Adjustment** - Global optimization of image positions
+- [ ] **Overlap Verification** - Confirm sufficient overlap for stitching
+- [ ] **Ghosting Detection** - Identify moving objects between frames
+- [ ] **Seam Line Optimization** - Intelligent boundary selection
+
+#### **General Purpose Alignment**
+- [ ] **Template Matching** - Reference-based image registration
+- [ ] **Phase Correlation** - Fast fourier-based alignment
+- [ ] **Multi-scale Registration** - Coarse-to-fine alignment approach
+- [ ] **Robust Estimation** - RANSAC outlier rejection
+- [ ] **Quality Assessment** - Alignment accuracy scoring
+- [ ] **Manual Control Points** - User-defined reference markers
+
+### **5️⃣ INTELLIGENT ORGANIZATION**
+
 #### **Noise Reduction**
 - [ ] **Temporal Denoising** - Multi-frame noise reduction
 - [ ] **Spatial Filtering** - Preserve detail while reducing noise
 - [ ] **Adaptive Processing** - Different algorithms for different regions
 - [ ] **Hot Pixel Removal** - Camera sensor defect correction
 - [ ] **Dark Frame Subtraction** - Camera noise calibration
-
-### **4️⃣ INTELLIGENT ORGANIZATION**
 
 #### **Auto-Classification**
 - [ ] **Scene Analysis** - Landscape, portrait, macro, astro classification
@@ -283,20 +357,48 @@ detection_config = {
   - [ ] Blending and exposure compensation
   - [ ] Output format optimization
 
-### **Phase 4: Image Stacking (Weeks 7-8)**
-- [ ] **Alignment Algorithms**
-  - [ ] Star field registration for astronomy
-  - [ ] Feature-based alignment for terrestrial
-  - [ ] Sub-pixel accuracy implementation
-  - [ ] Distortion correction handling
+### **Phase 4: Photo Alignment System (Weeks 7-8)**
+- [ ] **Alignment Infrastructure**
+  - [ ] Alignment processor interface design
+  - [ ] Multi-tool alignment manager
+  - [ ] Quality metrics and validation
+  - [ ] Configuration system for alignment tools
 
-- [ ] **Stacking Methods**
-  - [ ] Multiple stacking algorithm implementations
+- [ ] **Astrophotography Alignment**
+  - [ ] Star detection and cataloging algorithms
+  - [ ] Astrometry.net integration for plate solving
+  - [ ] SIRIL CLI integration for deep-sky alignment
+  - [ ] Sub-pixel registration implementation
+  - [ ] Mount drift detection and compensation
+
+- [ ] **Panoramic Alignment**
+  - [ ] Feature matching with SIFT/ORB/SURF
+  - [ ] Homography estimation and validation
+  - [ ] Bundle adjustment optimization
+  - [ ] Hugin `align_image_stack` integration
+  - [ ] Ghosting and moving object detection
+
+- [ ] **General Purpose Alignment**
+  - [ ] Template matching algorithms
+  - [ ] Phase correlation registration
+  - [ ] Multi-scale alignment approach
+  - [ ] RANSAC robust estimation
+  - [ ] Manual control point interface
+
+### **Phase 5: Image Stacking (Weeks 9-10)**
+- [ ] **Stacking Algorithms** 
+  - [ ] Multiple stacking method implementations
   - [ ] Memory-efficient processing for large stacks
   - [ ] Quality-based weight assignment
   - [ ] Noise analysis and reduction
 
-### **Phase 5: Intelligence & Automation (Weeks 9-10)**
+- [ ] **Integration with Alignment**
+  - [ ] Pre-alignment verification
+  - [ ] Alignment-guided stacking
+  - [ ] Quality feedback loops
+  - [ ] Calibration frame support (dark, flat, bias)
+
+### **Phase 6: Intelligence & Automation (Weeks 11-12)**
 - [ ] **Machine Learning Integration**
   - [ ] Scene classification models
   - [ ] Quality assessment neural networks
