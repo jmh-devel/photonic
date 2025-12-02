@@ -14,12 +14,13 @@ import (
 
 // router implements Processor and routes jobs to their concrete handlers.
 type router struct {
-	log      *slog.Logger
-	store    *storage.Store
-	alignMgr alignmentManager
-	rawMgr   *tasks.RawProcessorManager
-	stackFn  stackFunc
-	astroFac astroStackerFactory
+	log         *slog.Logger
+	store       *storage.Store
+	alignMgr    alignmentManager
+	rawMgr      *tasks.RawProcessorManager
+	stackFn     stackFunc
+	astroFac    astroStackerFactory
+	mathStacker astroStacker
 }
 
 type alignmentManager interface {
@@ -43,7 +44,7 @@ func newRouter(logger *slog.Logger, store *storage.Store, alignCfg *config.Align
 		rawMgr:   tasks.NewRawProcessorManager(rawCfg),
 		stackFn:  tasks.StackImages,
 		astroFac: func() astroStacker {
-			// Use proven enfuse tool instead of buggy ImageMagick implementation
+			// Smart stacker selection: enfuse for blending, ImageMagick for pure math
 			enfuseStacker := tasks.NewAstroEnfuseStacker()
 			if enfuseStacker.IsAvailable() {
 				return enfuseStacker
@@ -51,6 +52,8 @@ func newRouter(logger *slog.Logger, store *storage.Store, alignCfg *config.Align
 			// Fallback to ImageMagick if enfuse not available
 			return tasks.NewAstroStacker()
 		},
+		// Keep ImageMagick stacker for mathematical operations
+		mathStacker: tasks.NewAstroStacker(),
 	}
 }
 
@@ -281,7 +284,30 @@ func (r *router) handleStack(ctx context.Context, job Job) Result {
 
 	// Use astronomical stacking for advanced methods
 	if astroMode || method == "sigma-clip" || method == "kappa-sigma" || method == "winsorized" {
-		astroStacker := r.astroFac()
+		var astroStacker astroStacker
+
+		// Smart routing based on research and what actually works
+		if method == "star-trails" {
+			// Use enfuse for star-trails (blending desired)
+			astroStacker = r.astroFac()
+		} else if method == "average" || method == "mean" {
+			// For average/mean with --astro, use simple stacking (works!)
+			// Bypass complex sigma clipping that causes TV static
+			res, err := r.stackFn(ctx, tasks.StackRequest{
+				InputDir: inputDir,
+				Output:   job.Output,
+				Method:   "astro", // This maps to clean mathematical averaging
+			})
+			meta := map[string]any{
+				"output": res.OutputFile,
+				"method": "astro-" + method,
+			}
+			return Result{Job: job, Error: err, Meta: meta}
+		} else {
+			// Use mathematical stacking for other advanced methods
+			astroStacker = r.mathStacker
+		}
+
 		astroRes, err := astroStacker.StackImages(ctx, tasks.AstroStackRequest{
 			InputDir:      inputDir,
 			Output:        job.Output,

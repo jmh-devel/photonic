@@ -50,6 +50,9 @@ func (s *AstroEnfuseStacker) StackImages(ctx context.Context, req AstroStackRequ
 	outputPath := req.Output
 	if outputPath == "" || outputPath[len(outputPath)-1] == filepath.Separator {
 		outputPath = filepath.Join(outputPath, "astro_stack.tif")
+	} else if filepath.Ext(outputPath) == "" {
+		// Add .tif extension if no extension provided
+		outputPath = outputPath + ".tif"
 	}
 	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
 		return AstroStackResult{}, fmt.Errorf("failed to create output directory: %v", err)
@@ -108,23 +111,25 @@ func (s *AstroEnfuseStacker) buildEnfuseArgs(req AstroStackRequest, outputPath s
 		)
 
 	case "average", "mean":
-		// Equal exposure weighting for mean stacking
+		// Use star-trails-like approach but exposure-only for clean averaging
 		args = append(args,
-			"--exposure-weight=1.0",   // Full exposure weighting
-			"--saturation-weight=0.0", // No saturation bias (astronomical data)
-			"--contrast-weight=0.0",   // No contrast bias (we want averaging)
-			"--entropy-weight=0.0",    // No entropy bias
-			"--soft-mask",             // Smooth blending
+			"--exposure-weight=1.0",   // Full exposure weighting like star-trails
+			"--saturation-weight=0.0", // No saturation bias
+			"--contrast-weight=0.0",   // No contrast bias like star-trails
+			"--entropy-weight=0.0",    // No entropy bias like star-trails
+			"--soft-mask",             // Soft mask like star-trails (maybe this is key!)
+			// No levels specified - use enfuse defaults
 		)
 
 	case "median":
-		// Approximate median by reducing exposure sensitivity
+		// Minimal blending for median-like behavior
 		args = append(args,
 			"--exposure-weight=0.5", // Reduced exposure weighting
 			"--saturation-weight=0.0",
-			"--contrast-weight=0.2", // Some contrast for outlier rejection
+			"--contrast-weight=0.0", // No contrast bias to avoid star warping
 			"--entropy-weight=0.0",
-			"--soft-mask",
+			"--hard-mask", // Sharp masking for crisp results
+			"--levels=1",  // Minimal blend levels
 		)
 
 	case "sigma-clip":
@@ -138,23 +143,36 @@ func (s *AstroEnfuseStacker) buildEnfuseArgs(req AstroStackRequest, outputPath s
 		)
 
 	case "maximum":
-		// Maximum value stacking (for star trails)
+		// Maximum value stacking (for star trails and bright object enhancement)
 		args = append(args,
 			"--exposure-weight=1.0",
 			"--saturation-weight=0.5", // Favor bright pixels
 			"--contrast-weight=0.5",   // Favor high contrast (stars)
 			"--entropy-weight=0.2",
 			"--hard-mask",
+			"--levels=4",
+		)
+
+	case "focus", "detail-enhancement":
+		// Special mode for enhancing faint details in astronomical objects
+		args = append(args,
+			"--exposure-weight=0.8",   // Slight bias toward well-exposed areas
+			"--saturation-weight=0.3", // Preserve color information
+			"--contrast-weight=0.5",   // High contrast weight for detail enhancement
+			"--entropy-weight=0.2",    // Some entropy for structure preservation
+			"--hard-mask",             // Sharp boundaries
+			"--levels=7",              // Maximum blend levels for finest detail
 		)
 
 	default:
-		// Default: balanced astronomical stacking
+		// Default: pure astronomical stacking without multi-scale artifacts
 		args = append(args,
 			"--exposure-weight=1.0",
-			"--saturation-weight=0.1", // Very low saturation weight
-			"--contrast-weight=0.1",   // Low contrast weight
+			"--saturation-weight=0.0", // No saturation bias
+			"--contrast-weight=0.0",   // No contrast bias to prevent star warping
 			"--entropy-weight=0.0",
-			"--soft-mask",
+			"--hard-mask", // Sharp masking
+			"--levels=1",  // Single level to minimize warping
 		)
 	}
 

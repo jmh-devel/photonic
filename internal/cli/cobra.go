@@ -288,6 +288,9 @@ Examples:
   # Noise reduction stack (astrophotography)
   photonic stack /photos/astro/ --method average --alignment star --output stacked.tif
   
+  # Deep-sky object detail enhancement (astrophotography)
+  photonic stack /photos/astro/ --method detail-enhancement --astro --output enhanced.tif
+  
   # Star trails effect (aligned + unaligned combination)
   photonic stack /photos/aligned-and-processed/ --method star-trails --output trails.tif
   
@@ -344,7 +347,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&method, "method", "average", "stacking method (average|median|sigma-clip|kappa-sigma|winsorized|maximum|focus|star-trails)")
+	cmd.Flags().StringVar(&method, "method", "average", "stacking method (average|median|sigma-clip|kappa-sigma|winsorized|maximum|focus|detail-enhancement|star-trails)")
 	cmd.Flags().StringVar(&alignment, "alignment", "auto", "alignment method (auto|star|feature|none)")
 	cmd.Flags().StringVar(&quality, "quality", "normal", "processing quality (fast|normal|high)")
 	cmd.Flags().StringVarP(&output, "output", "o", root.cfg.Paths.DefaultOutput, "output file path")
