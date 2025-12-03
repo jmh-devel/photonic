@@ -78,6 +78,10 @@ func mapMethod(method string) string {
 		return "max"
 	case "min":
 		return "min"
+	case "star-trails":
+		return "max" // Star trails use maximum blending for trail effect
+	case "astro":
+		return "mean" // Clean mathematical averaging for astrophotography
 	default:
 		return "mean"
 	}

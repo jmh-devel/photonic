@@ -34,7 +34,12 @@ func (s *AstroEnfuseStacker) StackImages(ctx context.Context, req AstroStackRequ
 
 	fmt.Printf("Starting astronomical stacking with enfuse (proven tool)...\n")
 
-	// Get input images
+	// Special handling for star-trails method
+	if req.Method == "star-trails" {
+		return s.stackStarTrailsHybrid(ctx, req, start)
+	}
+
+	// Get input images for other methods
 	images, err := fsutil.ListImages(req.InputDir)
 	if err != nil {
 		return AstroStackResult{}, fmt.Errorf("failed to list images: %v", err)
@@ -45,6 +50,62 @@ func (s *AstroEnfuseStacker) StackImages(ctx context.Context, req AstroStackRequ
 	}
 
 	fmt.Printf("Stacking %d images with enfuse...\n", len(images))
+
+	// Continue with normal processing...
+	return s.processWithEnfuse(ctx, req, images, start)
+}
+
+// stackStarTrailsHybrid implements the hybrid star-trails method from STAR_TRAILS_DISCOVERY.md
+// Combines aligned images (sharp stars) + unaligned images (motion trails)
+func (s *AstroEnfuseStacker) stackStarTrailsHybrid(ctx context.Context, req AstroStackRequest, start time.Time) (AstroStackResult, error) {
+	fmt.Printf("Using hybrid star-trails method: aligned + unaligned images\n")
+
+	// Get unaligned images (motion trails)
+	unalignedImages, err := fsutil.ListImages(req.InputDir)
+	if err != nil {
+		return AstroStackResult{}, fmt.Errorf("failed to list unaligned images: %v", err)
+	}
+
+	// Look for aligned images - try pipeline-created directory first, then fallback to output/aligned-only
+	possibleAlignedDirs := []string{
+		filepath.Join(filepath.Dir(req.Output), "aligned"), // Pipeline-created directory
+		"output/aligned-only",                              // Manual aligned directory
+	}
+
+	var alignedImages []string
+	var alignedDir string
+	for _, dir := range possibleAlignedDirs {
+		if images, err := fsutil.ListImages(dir); err == nil && len(images) > 0 {
+			alignedImages = images
+			alignedDir = dir
+			break
+		}
+	}
+
+	if len(alignedImages) == 0 {
+		fmt.Printf("No aligned images found, using unaligned images only for motion trails\n")
+		// Fallback to unaligned images only
+		return s.processWithEnfuse(ctx, req, unalignedImages, start)
+	}
+
+	// Combine aligned + unaligned for the hybrid effect
+	allImages := make([]string, 0, len(alignedImages)+len(unalignedImages))
+	allImages = append(allImages, alignedImages...)   // Sharp stars first
+	allImages = append(allImages, unalignedImages...) // Motion trails second
+
+	fmt.Printf("Star-trails hybrid: %d aligned (from %s) + %d unaligned = %d total images\n",
+		len(alignedImages), alignedDir, len(unalignedImages), len(allImages))
+
+	return s.processWithEnfuse(ctx, req, allImages, start)
+}
+
+// processWithEnfuse handles the actual enfuse processing
+func (s *AstroEnfuseStacker) processWithEnfuse(ctx context.Context, req AstroStackRequest, images []string, start time.Time) (AstroStackResult, error) {
+	if len(images) < 2 {
+		return AstroStackResult{}, fmt.Errorf("need at least 2 images for stacking, got %d", len(images))
+	}
+
+	fmt.Printf("Processing %d images with enfuse...\n", len(images))
 
 	// Prepare output path
 	outputPath := req.Output
@@ -111,14 +172,14 @@ func (s *AstroEnfuseStacker) buildEnfuseArgs(req AstroStackRequest, outputPath s
 		)
 
 	case "average", "mean":
-		// Use star-trails-like approach but exposure-only for clean averaging
+		// For averaging, use equal exposure weighting and let enfuse handle the rest
+		// DO NOT set all weights to 0 - that breaks enfuse blending
 		args = append(args,
-			"--exposure-weight=1.0",   // Full exposure weighting like star-trails
-			"--saturation-weight=0.0", // No saturation bias
-			"--contrast-weight=0.0",   // No contrast bias like star-trails
-			"--entropy-weight=0.0",    // No entropy bias like star-trails
-			"--soft-mask",             // Soft mask like star-trails (maybe this is key!)
-			// No levels specified - use enfuse defaults
+			"--exposure-weight=1.0",   // Equal exposure contribution
+			"--saturation-weight=0.0", // No saturation bias for clean averaging
+			"--contrast-weight=0.0",   // No contrast bias for averaging
+			"--entropy-weight=0.0",    // No entropy bias for averaging
+			// Use soft-mask for smoother averaging blending
 		)
 
 	case "median":
@@ -165,18 +226,16 @@ func (s *AstroEnfuseStacker) buildEnfuseArgs(req AstroStackRequest, outputPath s
 		)
 
 	default:
-		// Default: pure astronomical stacking without multi-scale artifacts
+		// Default: Test 5 parameters (best results from testing) - equal weights for clean stacking
 		args = append(args,
-			"--exposure-weight=1.0",
-			"--saturation-weight=0.0", // No saturation bias
-			"--contrast-weight=0.0",   // No contrast bias to prevent star warping
-			"--entropy-weight=0.0",
-			"--hard-mask", // Sharp masking
-			"--levels=1",  // Single level to minimize warping
+			"--exposure-weight=1.0",   // Equal exposure contribution
+			"--saturation-weight=1.0", // Equal saturation contribution
+			"--contrast-weight=1.0",   // Equal contrast contribution
+			"--entropy-weight=1.0",    // Equal entropy contribution
+			"--soft-mask",             // Soft masking for smooth blending (no artifacts)
+			"--levels=5",              // Multiple levels for quality without excessive processing
 		)
-	}
-
-	// Add all input images
+	} // Add all input images
 	args = append(args, images...)
 
 	return args

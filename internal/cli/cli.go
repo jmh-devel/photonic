@@ -662,6 +662,128 @@ func (r *Root) cmdAlign(ctx context.Context, args []string) error {
 	})
 }
 
+// runPipeline executes comprehensive processing pipelines for common workflows
+func (r *Root) runPipeline(workflow, inputDir string, options map[string]interface{}) error {
+	ctx := context.Background()
+
+	// Get options with defaults
+	alignment := getStringOption(options, "alignment", "star")
+	output := getStringOption(options, "output", "")
+	rawTool := getStringOption(options, "rawTool", "darktable")
+	quality := getStringOption(options, "quality", "normal")
+
+	if output == "" {
+		return fmt.Errorf("output file path is required")
+	}
+
+	r.log.Info("Starting pipeline", "workflow", workflow, "input", inputDir)
+
+	// Step 1: RAW Processing (if needed)
+	processedDir := inputDir
+
+	// Step 2: Alignment (if input is not already aligned)
+	alignedDir := processedDir
+
+	// Check if input directory contains aligned files already
+	if !containsAlignedFiles(processedDir) {
+		alignedDir = "output/pipeline-aligned"
+		fmt.Printf("🔗 Step 1: Aligning images with %s alignment...\n", alignment)
+
+		// Ensure output directory exists
+		if err := os.MkdirAll(alignedDir, 0755); err != nil {
+			return fmt.Errorf("failed to create alignment output directory: %w", err)
+		}
+
+		alignJob := pipeline.Job{
+			ID:        newID("pipeline-align"),
+			Type:      pipeline.JobAlign,
+			InputPath: processedDir,
+			Output:    alignedDir,
+			Options: map[string]any{
+				"atype":         alignment,
+				"quality":       quality,
+				"starThreshold": 0.85,
+			},
+		}
+
+		if err := r.enqueueAndWait(ctx, alignJob); err != nil {
+			return fmt.Errorf("alignment failed: %w", err)
+		}
+	} else {
+		fmt.Printf("🔗 Step 1: Using already-aligned input images...\n")
+	}
+
+	// Step 3: Stacking based on workflow
+	fmt.Printf("📚 Step 2: Stacking with %s workflow...\n", workflow)
+
+	var method string
+	var astroMode bool
+
+	switch workflow {
+	case "astro-stack":
+		method = "average"
+		astroMode = true
+	case "astro-trails":
+		method = "star-trails"
+		astroMode = true
+	case "astro-enhance":
+		method = "detail-enhancement"
+		astroMode = true
+	default:
+		return fmt.Errorf("unknown workflow: %s", workflow)
+	}
+
+	// Override method if specified
+	if methodOverride := getStringOption(options, "method", ""); methodOverride != "" {
+		method = methodOverride
+	}
+
+	stackJob := pipeline.Job{
+		ID:        newID("pipeline-stack"),
+		Type:      pipeline.JobStack,
+		InputPath: alignedDir,
+		Output:    output,
+		Options: map[string]any{
+			"method":    method,
+			"astroMode": astroMode,
+			"quality":   quality,
+			"rawTool":   rawTool,
+		},
+	}
+
+	if err := r.enqueueAndWait(ctx, stackJob); err != nil {
+		return fmt.Errorf("stacking failed: %w", err)
+	}
+
+	fmt.Printf("✅ Pipeline complete! Output: %s\n", output)
+	return nil
+}
+
+// containsAlignedFiles checks if a directory contains files that appear to be already aligned
+func containsAlignedFiles(dir string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+
+	// Check for aligned file patterns
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.Contains(name, "aligned") || strings.Contains(name, "pano_aligned_") {
+			return true
+		}
+	}
+
+	return false
+}
+
+func getStringOption(options map[string]interface{}, key, defaultValue string) string {
+	if val, ok := options[key].(string); ok && val != "" {
+		return val
+	}
+	return defaultValue
+}
+
 func (r *Root) enqueueAndWait(ctx context.Context, job pipeline.Job) error {
 	resCh, unsubscribe := r.pipeline.Subscribe()
 	defer unsubscribe()

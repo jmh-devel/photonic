@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"photonic/internal/config"
 	"photonic/internal/fsutil"
@@ -44,16 +45,20 @@ func newRouter(logger *slog.Logger, store *storage.Store, alignCfg *config.Align
 		rawMgr:   tasks.NewRawProcessorManager(rawCfg),
 		stackFn:  tasks.StackImages,
 		astroFac: func() astroStacker {
-			// Smart stacker selection: enfuse for blending, ImageMagick for pure math
+			// Smart stacker selection: DSS (professional) > enfuse (proven) > ImageMagick (fallback)
+			dssStacker := tasks.NewDSSStacker()
+			if dssStacker.IsAvailable() {
+				return dssStacker
+			}
 			enfuseStacker := tasks.NewAstroEnfuseStacker()
 			if enfuseStacker.IsAvailable() {
 				return enfuseStacker
 			}
-			// Fallback to ImageMagick if enfuse not available
+			// Fallback to ImageMagick if neither DSS nor enfuse available
 			return tasks.NewAstroStacker()
 		},
-		// Keep ImageMagick stacker for mathematical operations
-		mathStacker: tasks.NewAstroStacker(),
+		// Keep enfuse stacker for mathematical operations too - ImageMagick has broken blending
+		mathStacker: tasks.NewAstroEnfuseStacker(),
 	}
 }
 
@@ -261,6 +266,7 @@ func (r *router) handleStack(ctx context.Context, job Job) Result {
 		method = "average"
 	}
 	rawTool, _ := job.Options["rawTool"].(string)
+	alignment, _ := job.Options["alignment"].(string)
 
 	// Check if astronomical stacking is requested
 	astroMode, _ := job.Options["astroMode"].(bool)
@@ -282,30 +288,64 @@ func (r *router) handleStack(ctx context.Context, job Job) Result {
 		}
 	}
 
-	// Use astronomical stacking for advanced methods
-	if astroMode || method == "sigma-clip" || method == "kappa-sigma" || method == "winsorized" {
-		var astroStacker astroStacker
+	// PIPELINE: Handle alignment before stacking if requested
+	// Skip alignment for DSS since it does internal alignment
+	if method != "dss" && alignment != "auto" && alignment != "none" && alignment != "" {
+		fmt.Printf("Pipeline: Performing alignment (%s) before stacking\n", alignment)
 
-		// Smart routing based on research and what actually works
-		if method == "star-trails" {
-			// Use enfuse for star-trails (blending desired)
-			astroStacker = r.astroFac()
-		} else if method == "average" || method == "mean" {
-			// For average/mean with --astro, use simple stacking (works!)
-			// Bypass complex sigma clipping that causes TV static
-			res, err := r.stackFn(ctx, tasks.StackRequest{
-				InputDir: inputDir,
-				Output:   job.Output,
-				Method:   "astro", // This maps to clean mathematical averaging
-			})
-			meta := map[string]any{
-				"output": res.OutputFile,
-				"method": "astro-" + method,
+		// Create aligned directory in the same structure as input
+		// e.g., if input is test-data/align/sample-3, put aligned files in output/aligned/sample-3/
+		inputBaseName := filepath.Base(job.InputPath)
+		alignedDir := filepath.Join("output/aligned", inputBaseName)
+		if err := os.MkdirAll(alignedDir, 0755); err != nil {
+			return Result{Job: job, Error: fmt.Errorf("failed to create aligned directory: %v", err)}
+		}
+
+		// Perform alignment using the alignment manager
+		if r.alignMgr != nil {
+			alignJob := Job{
+				ID:        job.ID + "-align",
+				Type:      JobAlign,
+				InputPath: inputDir, // Use processed RAW images
+				Output:    alignedDir,
+				Options: map[string]any{
+					"type":      alignment, // star, feature, etc.
+					"quality":   job.Options["quality"],
+					"cropToFit": true,
+					"rawTool":   rawTool,
+				},
 			}
-			return Result{Job: job, Error: err, Meta: meta}
+
+			alignResult := r.handleAlign(ctx, alignJob)
+			if alignResult.Error != nil {
+				return Result{Job: job, Error: fmt.Errorf("alignment failed: %v", alignResult.Error)}
+			}
+
+			fmt.Printf("Pipeline: Alignment complete, aligned images in %s\n", alignedDir)
+
+			// NOW USE THE ALIGNED IMAGES FOR STACKING!
+			inputDir = alignedDir
 		} else {
-			// Use mathematical stacking for other advanced methods
-			astroStacker = r.mathStacker
+			return Result{Job: job, Error: fmt.Errorf("alignment manager not available")}
+		}
+	} else if method == "dss" && alignment != "auto" && alignment != "none" && alignment != "" {
+		fmt.Printf("Pipeline: Skipping pre-alignment for DSS (DSS handles alignment internally)\n")
+	}
+
+	// Use astronomical stacking for advanced methods
+	if astroMode || method == "sigma-clip" || method == "kappa-sigma" || method == "winsorized" || method == "dss" {
+		// Use proper enfuse-based astronomical stacking for ALL methods
+		// The ImageMagick-based stack.go has broken blending math (50% accumulation)
+		// The sigma-clipping math stacker produces "TV static" artifacts
+		// Only enfuse produces proper results - use it for everything
+		astroStacker := r.mathStacker // This should be the enfuse stacker
+
+		// For DSS method, use the DSS stacker directly
+		if method == "dss" {
+			dssStacker := tasks.NewDSSStacker()
+			if dssStacker.IsAvailable() {
+				astroStacker = dssStacker
+			}
 		}
 
 		astroRes, err := astroStacker.StackImages(ctx, tasks.AstroStackRequest{
@@ -331,15 +371,29 @@ func (r *router) handleStack(ctx context.Context, job Job) Result {
 		return Result{Job: job, Error: err, Meta: meta}
 	}
 
-	// Use standard stacking for basic methods
-	res, err := r.stackFn(ctx, tasks.StackRequest{
-		InputDir: inputDir,
-		Output:   job.Output,
-		Method:   method,
+	// ALL stacking now uses enfuse - the ImageMagick stackFn has broken 50% blending
+	// Route everything to enfuse stacker for consistent results
+	astroStacker := r.mathStacker // This should be the enfuse stacker
+
+	astroRes, err := astroStacker.StackImages(ctx, tasks.AstroStackRequest{
+		InputDir:      inputDir,
+		Output:        job.Output,
+		Method:        method,
+		SigmaLow:      2.0, // reasonable defaults
+		SigmaHigh:     2.0,
+		Iterations:    1, // single iteration for simple methods
+		KappaFactor:   1.5,
+		WinsorPercent: 5.0,
 	})
+
 	meta := map[string]any{
-		"output": res.OutputFile,
-		"method": res.Method,
+		"output":         astroRes.OutputFile,
+		"method":         astroRes.Method,
+		"imageCount":     astroRes.ImageCount,
+		"rejectedPixels": astroRes.RejectedPixels,
+		"processingTime": astroRes.ProcessingTime.String(),
+		"cosmicRayCount": astroRes.CosmicRayCount,
+		"signalToNoise":  astroRes.SignalToNoise,
 	}
 	return Result{Job: job, Error: err, Meta: meta}
 }

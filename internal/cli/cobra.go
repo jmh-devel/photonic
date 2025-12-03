@@ -32,6 +32,7 @@ focus stacking, timelapses, and image alignment.`,
 	rootCmd.AddCommand(newTimelapseCmd(root))
 	rootCmd.AddCommand(newStackCmd(root))
 	rootCmd.AddCommand(newAlignCmd(root))
+	rootCmd.AddCommand(newPipelineCmd(root)) // New: comprehensive pipelines
 	rootCmd.AddCommand(newRawCmd(root))
 	rootCmd.AddCommand(newServeCmd(root))
 	rootCmd.AddCommand(newConfigCmd(root))
@@ -305,7 +306,7 @@ Examples:
 
 			if output == root.cfg.Paths.DefaultOutput {
 				inputBaseName := filepath.Base(filepath.Clean(input))
-				output = filepath.Join("stacked-output", inputBaseName, "stacked.tif")
+				output = filepath.Join("output", method, inputBaseName, inputBaseName+".tif")
 			}
 
 			root.log.Info("stack command parsed",
@@ -347,7 +348,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&method, "method", "average", "stacking method (average|median|sigma-clip|kappa-sigma|winsorized|maximum|focus|detail-enhancement|star-trails)")
+	cmd.Flags().StringVar(&method, "method", "average", "stacking method (average|median|sigma-clip|kappa-sigma|winsorized|maximum|focus|detail-enhancement|star-trails|baseline|dss)")
 	cmd.Flags().StringVar(&alignment, "alignment", "auto", "alignment method (auto|star|feature|none)")
 	cmd.Flags().StringVar(&quality, "quality", "normal", "processing quality (fast|normal|high)")
 	cmd.Flags().StringVarP(&output, "output", "o", root.cfg.Paths.DefaultOutput, "output file path")
@@ -776,6 +777,61 @@ The server provides:
 	cmd.Flags().IntVarP(&maxUploads, "max-uploads", "u", 10, "Maximum concurrent uploads")
 	cmd.Flags().Int64VarP(&maxFileSize, "max-file-size", "f", 500*1024*1024, "Maximum file size in bytes")
 	cmd.Flags().BoolVarP(&requireChecksums, "require-checksums", "c", true, "Require checksum verification")
+
+	return cmd
+}
+
+// newPipelineCmd creates a comprehensive pipeline command for common workflows
+func newPipelineCmd(root *Root) *cobra.Command {
+	var (
+		alignment string
+		method    string
+		output    string
+		rawTool   string
+		quality   string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "pipeline <workflow> <input_directory>",
+		Short: "Run complete processing pipelines for common workflows",
+		Long: `Execute end-to-end processing pipelines that combine multiple steps.
+
+Available workflows:
+  astro-stack        RAW → Aligned → Stacked (clean astronomical averaging)  
+  astro-trails       RAW → Aligned → Star Trails (artistic blending)
+  astro-enhance      RAW → Aligned → Enhanced Deep-Sky (detail optimization)
+
+Examples:
+  # Complete astronomical stacking pipeline  
+  photonic pipeline astro-stack /photos/astro/ --output stacked_result.tif
+  
+  # Beautiful star trails from RAW images
+  photonic pipeline astro-trails /photos/astro/ --output star_trails.tif
+  
+  # Enhanced deep-sky object processing
+  photonic pipeline astro-enhance /photos/m31/ --output m31_enhanced.tif`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			workflow := args[0]
+			inputDir := args[1]
+
+			return root.runPipeline(workflow, inputDir, map[string]interface{}{
+				"alignment": alignment,
+				"method":    method,
+				"output":    output,
+				"rawTool":   rawTool,
+				"quality":   quality,
+			})
+		},
+	}
+
+	cmd.Flags().StringVar(&alignment, "alignment", "star", "alignment method (auto|star|feature|none)")
+	cmd.Flags().StringVar(&method, "method", "", "override stacking method (auto-detected from workflow)")
+	cmd.Flags().StringVarP(&output, "output", "o", "", "output file path (required)")
+	cmd.Flags().StringVar(&rawTool, "raw-tool", "darktable", "RAW processor (darktable|imagemagick|dcraw|rawtherapee)")
+	cmd.Flags().StringVar(&quality, "quality", "normal", "processing quality (fast|normal|high)")
+
+	cmd.MarkFlagRequired("output")
 
 	return cmd
 }
