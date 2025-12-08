@@ -91,10 +91,13 @@ func (s *DSSStacker) StackImages(ctx context.Context, req AstroStackRequest) (As
 		return AstroStackResult{}, fmt.Errorf("failed to create output directory: %v", err)
 	}
 
-	// Move Autosave.tif to the requested output path
-	if err := os.Rename(autosavePath, req.Output); err != nil {
-		return AstroStackResult{}, fmt.Errorf("failed to move DSS output: %v", err)
-	} // Clean up DSS file list
+	// Copy Autosave.tif to the requested output path (handles cross-device links)
+	if err := copyFile(autosavePath, req.Output); err != nil {
+		return AstroStackResult{}, fmt.Errorf("failed to copy DSS output: %v", err)
+	}
+	
+	// Clean up the original Autosave.tif
+	os.Remove(autosavePath) // Clean up DSS file list
 	os.Remove(dssFileList)
 
 	fmt.Printf("DeepSkyStacker astronomical stacking complete in %v\n", duration)
