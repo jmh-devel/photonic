@@ -181,6 +181,8 @@ func newTimelapseCmd(root *Root) *cobra.Command {
 		output     string
 		outputDir  string
 		resolution string
+		shareSet   string
+		quality    string
 		tool       string
 		rawTool    string
 		noCache    bool
@@ -217,6 +219,7 @@ Supports multiple output formats including MP4, 3GP, and GIF.`,
 				"fps", fps,
 				"stabilize", stabilize,
 				"resolution", resolution,
+				"share_set", shareSet,
 				"formats", formats,
 				"tool", tool,
 				"raw_tool", rawTool,
@@ -224,22 +227,37 @@ Supports multiple output formats including MP4, 3GP, and GIF.`,
 				"no_preserve", noPreserve,
 			)
 
+			resolutions := []string{}
+			switch strings.ToLower(shareSet) {
+			case "":
+			case "youtube":
+				resolutions = []string{"4k", "1080p"}
+			case "youtube-mobile":
+				resolutions = []string{"4k", "1080p", "720p"}
+			default:
+				return fmt.Errorf("unknown share set %q (choose youtube or youtube-mobile)", shareSet)
+			}
+			if shareSet != "" && resolution != "" {
+				return fmt.Errorf("choose either --resolution or --share-set, not both")
+			}
 			job := pipeline.Job{
 				ID:        newID("tl"),
 				Type:      pipeline.JobTimelapse,
 				InputPath: input,
 				Output:    output,
 				Options: map[string]any{
-					"fps":        fps,
-					"stabilize":  stabilize,
-					"tool":       tool,
-					"rawTool":    rawTool,
-					"outputDir":  outputDir,
-					"resolution": resolution,
-					"formats":    formats,
-					"noCache":    noCache,
-					"noPreserve": noPreserve,
-					"source":     "cli",
+					"fps":         fps,
+					"stabilize":   stabilize,
+					"tool":        tool,
+					"rawTool":     rawTool,
+					"outputDir":   outputDir,
+					"resolution":  resolution,
+					"resolutions": resolutions,
+					"quality":     quality,
+					"formats":     formats,
+					"noCache":     noCache,
+					"noPreserve":  noPreserve,
+					"source":      "cli",
 				},
 			}
 
@@ -252,7 +270,9 @@ Supports multiple output formats including MP4, 3GP, and GIF.`,
 	cmd.Flags().BoolVar(&stabilize, "stabilize", true, "enable video stabilization")
 	cmd.Flags().StringVarP(&output, "output", "o", root.cfg.Paths.DefaultOutput, "output path or directory")
 	cmd.Flags().StringVar(&outputDir, "output-dir", "", "output directory for multiple formats (optional)")
-	cmd.Flags().StringVar(&resolution, "resolution", "", "output resolution (1080p|720p|480p|240p)")
+	cmd.Flags().StringVar(&resolution, "resolution", "", "single output resolution (4k|1440p|1080p|720p|480p|240p)")
+	cmd.Flags().StringVar(&shareSet, "share-set", "", "generate a rendition set (youtube: 4k+1080p; youtube-mobile: 4k+1080p+720p)")
+	cmd.Flags().StringVar(&quality, "quality", "medium", "H.264 encoding quality (high|medium|low)")
 	cmd.Flags().StringVar(&tool, "tool", "", "timelapse tool to use (ffmpeg|mencoder|avconv), auto-detect if empty")
 	cmd.Flags().StringVar(&rawTool, "raw-tool", "", "RAW processor to use (darktable|imagemagick|dcraw|rawtherapee), uses config default if empty")
 	cmd.Flags().BoolVar(&noCache, "no-cache", false, "ignore existing cache and force fresh RAW processing")

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"photonic/internal/fsutil"
+	"sort"
 	"strings"
 	"time"
 )
@@ -26,13 +27,15 @@ func backupExistingFile(filepath string) error {
 
 // TimelapseRequest describes a timelapse job.
 type TimelapseRequest struct {
-	InputDir   string
-	Output     string
-	OutputDir  string // Optional: specify directory for multiple formats
-	FPS        int
-	Stabilize  bool
-	Formats    []string // Supported: "mp4", "3gp", "3gp-h264", "gif"
-	Resolution string   // Optional: "1080p", "720p", "480p", "240p" for mobile
+	InputDir    string
+	Output      string
+	OutputDir   string // Optional: specify directory for multiple formats
+	FPS         int
+	Stabilize   bool
+	Formats     []string // Supported: "mp4", "3gp", "3gp-h264", "gif"
+	Resolution  string   // Optional legacy single output resolution.
+	Resolutions []string // Optional multiple output resolutions.
+	Quality     string   // H.264 quality: high, medium, or low.
 }
 
 // TimelapseResult captures output metadata.
@@ -44,10 +47,13 @@ type TimelapseResult struct {
 
 // OutputFile represents a single output file with its format details
 type OutputFile struct {
-	Path   string
-	Format string
-	Codec  string
-	Size   int64 // file size in bytes
+	Path       string
+	Format     string
+	Codec      string
+	Resolution string
+	Width      int
+	Height     int
+	Size       int64 // file size in bytes
 }
 
 // BuildTimelapse attempts to run ffmpeg over the directory with multiple format support.
@@ -60,6 +66,12 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 	}
 	if req.FPS == 0 {
 		req.FPS = 10 // Default to 10fps for astronomy timelapses
+	}
+	if req.Quality == "" {
+		req.Quality = "medium"
+	}
+	if req.Quality != "high" && req.Quality != "medium" && req.Quality != "low" {
+		return TimelapseResult{}, fmt.Errorf("unsupported quality %q (choose high, medium, or low)", req.Quality)
 	}
 
 	// Log the start of timelapse processing
@@ -84,6 +96,7 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 		logger.Error("no images found", "input_dir", req.InputDir)
 		return TimelapseResult{}, fmt.Errorf("no images found in %s", req.InputDir)
 	}
+	sort.Strings(allImages)
 
 	logger.Info("found images for timelapse",
 		"total_images", len(allImages),
@@ -115,6 +128,7 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 
 	// Add already processed files
 	processFiles = append(processFiles, processedFiles...)
+	sort.Strings(processFiles)
 
 	if len(processFiles) == 0 {
 		return TimelapseResult{}, fmt.Errorf("no processable images found")
@@ -126,16 +140,6 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 			os.RemoveAll(tempDir)
 		}
 	}()
-
-	// Use the first processed file's directory for pattern matching
-	var pattern string
-	if needsCleanup && len(processFiles) > 0 {
-		// For converted files, use temp directory pattern
-		pattern = filepath.Join(tempDir, "*.jpg")
-	} else {
-		// For existing files, use original pattern approach
-		pattern = filepath.Join(req.InputDir, "*.jpg")
-	}
 
 	// Generate output files for each format
 	var outputFiles []OutputFile
@@ -159,19 +163,31 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 	}
 
 	// Process each requested format
+	resolutions := req.Resolutions
+	if len(resolutions) == 0 {
+		resolutions = []string{req.Resolution}
+	}
+	if len(resolutions) == 0 || (len(resolutions) == 1 && resolutions[0] == "") {
+		resolutions = []string{"1080p"}
+	}
 	for _, format := range req.Formats {
-		outputFile, err := generateTimelapseFormat(ctx, pattern, baseOutput, format, req.FPS, req.Resolution)
-		if err != nil {
-			logger.Error("failed to generate format", "format", format, "error", err)
-			continue
+		for _, resolution := range resolutions {
+			width, height, canonical, err := resolutionSize(resolution)
+			if err != nil {
+				return TimelapseResult{}, err
+			}
+			outputBase := baseOutput
+			if len(resolutions) > 1 || req.OutputDir != "" {
+				outputBase += "-" + canonical
+			}
+			outputFile, err := generateTimelapseFormat(ctx, processFiles, outputBase, format, req.FPS, canonical, req.Quality, width, height)
+			if err != nil {
+				logger.Error("failed to generate rendition", "format", format, "resolution", canonical, "error", err)
+				return TimelapseResult{OutputFiles: outputFiles, FrameCount: len(processFiles), UsedFFmpeg: true}, err
+			}
+			outputFiles = append(outputFiles, outputFile)
+			logger.Info("generated timelapse rendition successfully", "format", format, "resolution", canonical, "output_file", outputFile.Path, "codec", outputFile.Codec)
 		}
-		outputFiles = append(outputFiles, outputFile)
-
-		logger.Info("generated timelapse format successfully",
-			"format", format,
-			"output_file", outputFile.Path,
-			"codec", outputFile.Codec,
-		)
 	}
 
 	if len(outputFiles) == 0 {
@@ -187,14 +203,44 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 }
 
 // generateTimelapseFormat creates a single timelapse in the specified format
-func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format string, fps int, resolution string) (OutputFile, error) {
+func generateTimelapseFormat(ctx context.Context, frames []string, baseOutput, format string, fps int, resolution, quality string, width, height int) (OutputFile, error) {
 	logger := slog.Default()
 
 	var outputPath string
 	var args []string
 
-	// Base args for all formats
-	baseArgs := []string{"-y", "-pattern_type", "glob", "-i", pattern, "-r", fmt.Sprint(fps)}
+	fitFilter := getVideoFilter(resolution)
+	baseArgs := []string{"-y"}
+	if framesHaveSameExtension(frames) {
+		// The normal Darktable export is a homogeneous TIFF sequence. The concat
+		// demuxer streams those frames one at a time instead of opening hundreds
+		// of full-resolution TIFF decoders simultaneously.
+		manifestDir, err := os.MkdirTemp("", "photonic-timelapse-*")
+		if err != nil {
+			return OutputFile{}, fmt.Errorf("create frame manifest directory: %w", err)
+		}
+		defer os.RemoveAll(manifestDir)
+		manifest := filepath.Join(manifestDir, "frames.ffconcat")
+		if err := writeConcatManifest(manifest, frames, fps); err != nil {
+			return OutputFile{}, err
+		}
+		baseArgs = append(baseArgs, "-f", "concat", "-safe", "0", "-i", manifest, "-r", fmt.Sprint(fps), "-vf", fitFilter)
+	} else {
+		// Mixed formats need separate decoders, as the concat demuxer assumes all
+		// files use the first frame's codec. Pass filenames as argv elements.
+		for _, frame := range frames {
+			baseArgs = append(baseArgs, "-loop", "1", "-framerate", fmt.Sprint(fps), "-t", fmt.Sprintf("%.9f", 1/float64(fps)), "-i", frame)
+		}
+		filterParts := make([]string, 0, len(frames)+1)
+		concatInputs := make([]string, 0, len(frames))
+		for i := range frames {
+			label := fmt.Sprintf("v%d", i)
+			filterParts = append(filterParts, fmt.Sprintf("[%d:v]%s,setpts=PTS-STARTPTS[%s]", i, fitFilter, label))
+			concatInputs = append(concatInputs, "["+label+"]")
+		}
+		filterParts = append(filterParts, strings.Join(concatInputs, "")+fmt.Sprintf("concat=n=%d:v=1:a=0[outv]", len(frames)))
+		baseArgs = append(baseArgs, "-filter_complex", strings.Join(filterParts, ";"), "-map", "[outv]", "-r", fmt.Sprint(fps))
+	}
 
 	switch format {
 	case "mp4":
@@ -205,16 +251,12 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 		}
 		args = append(baseArgs,
 			"-c:v", "libx264",
-			"-profile:v", "high444", // High 4:4:4 Predictive profile like working file
-			"-level", "4.0",
-			"-pix_fmt", "yuvj444p", // Full range 4:4:4 like working file
-			"-b:v", "7600k", // Match bitrate of working file
-			"-maxrate", "8000k",
-			"-bufsize", "8000k",
+			"-profile:v", "high",
+			"-pix_fmt", "yuv420p",
+			"-crf", getTimelapseCRF(quality),
+			"-preset", "slow",
+			"-movflags", "+faststart",
 		)
-		if resolution != "" {
-			args = append(args, "-vf", getVideoFilter(resolution))
-		}
 		args = append(args, outputPath)
 
 	case "mp4-h265":
@@ -228,10 +270,8 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 			"-preset", "medium",
 			"-crf", "28",
 			"-pix_fmt", "yuv420p",
+			"-movflags", "+faststart",
 		)
-		if resolution != "" {
-			args = append(args, "-vf", getVideoFilter(resolution))
-		}
 		args = append(args, outputPath)
 
 	case "3gp":
@@ -255,9 +295,6 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 			"-brand", "3gp4", // Match major brand of working file
 		)
 		// Keep original resolution initially - user can specify smaller if needed
-		if resolution != "" {
-			args = append(args, "-vf", getVideoFilter(resolution))
-		}
 		args = append(args, outputPath)
 
 	case "3gp-h264":
@@ -274,7 +311,6 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 			"-b:v", "800k",
 			"-maxrate", "1200k",
 			"-bufsize", "1200k",
-			"-vf", "scale=480:320", // Slightly higher resolution
 			outputPath,
 		)
 
@@ -294,7 +330,6 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 			"-maxrate", "400k",
 			"-bufsize", "400k",
 			"-pix_fmt", "yuv420p",
-			"-vf", "scale=320:240", // Small resolution for flip phones
 			"-r", "12", // Lower framerate for old devices
 			"-f", "3gp",
 			"-brand", "3gp4",
@@ -307,12 +342,7 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 		if err := backupExistingFile(outputPath); err != nil {
 			logger.Warn("failed to backup existing file", "file", outputPath, "error", err)
 		}
-		// Simpler GIF generation that handles varying image sizes
-		args = append(baseArgs,
-			"-vf", fmt.Sprintf("fps=%d,scale=480:480:force_original_aspect_ratio=decrease:flags=lanczos,pad=480:480:(ow-iw)/2:(oh-ih)/2", fps),
-			"-y",
-			outputPath,
-		)
+		args = append(baseArgs, outputPath)
 
 	default:
 		return OutputFile{}, fmt.Errorf("unsupported format: %s", format)
@@ -320,8 +350,7 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 
 	logger.Info("executing ffmpeg command",
 		"format", format,
-		"args", args,
-		"pattern", pattern,
+		"frame_count", len(frames),
 		"output_file", outputPath,
 	)
 
@@ -347,26 +376,97 @@ func generateTimelapseFormat(ctx context.Context, pattern, baseOutput, format st
 	codec := getCodecForFormat(format)
 
 	return OutputFile{
-		Path:   outputPath,
-		Format: format,
-		Codec:  codec,
-		Size:   stat.Size(),
+		Path:       outputPath,
+		Format:     format,
+		Codec:      codec,
+		Resolution: resolution,
+		Width:      width,
+		Height:     height,
+		Size:       stat.Size(),
 	}, nil
+}
+
+func framesHaveSameExtension(frames []string) bool {
+	if len(frames) < 2 {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(frames[0]))
+	for _, frame := range frames[1:] {
+		if strings.ToLower(filepath.Ext(frame)) != ext {
+			return false
+		}
+	}
+	return true
+}
+
+func writeConcatManifest(path string, frames []string, fps int) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create frame manifest: %w", err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintln(f, "ffconcat version 1.0"); err != nil {
+		return err
+	}
+	for _, frame := range frames {
+		abs, err := filepath.Abs(frame)
+		if err != nil {
+			return fmt.Errorf("resolve frame path %q: %w", frame, err)
+		}
+		quoted := strings.ReplaceAll(strings.ReplaceAll(abs, `\`, `\\`), `'`, `\'`)
+		if _, err := fmt.Fprintf(f, "file '%s'\nduration %.9f\n", quoted, 1/float64(fps)); err != nil {
+			return err
+		}
+	}
+	if len(frames) > 0 {
+		abs, err := filepath.Abs(frames[len(frames)-1])
+		if err != nil {
+			return err
+		}
+		quoted := strings.ReplaceAll(strings.ReplaceAll(abs, `\`, `\\`), `'`, `\'`)
+		if _, err := fmt.Fprintf(f, "file '%s'\n", quoted); err != nil {
+			return err
+		}
+	}
+	return f.Close()
 }
 
 // getVideoFilter returns the appropriate video filter for resolution scaling
 func getVideoFilter(resolution string) string {
-	switch resolution {
+	w, h, _, err := resolutionSize(resolution)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1", w, h, w, h)
+}
+
+func resolutionSize(resolution string) (int, int, string, error) {
+	switch strings.ToLower(resolution) {
+	case "4k", "2160p", "uhd":
+		return 3840, 2160, "4k", nil
+	case "1440p":
+		return 2560, 1440, "1440p", nil
 	case "1080p":
-		return "scale=1920:1080"
+		return 1920, 1080, "1080p", nil
 	case "720p":
-		return "scale=1280:720"
+		return 1280, 720, "720p", nil
 	case "480p":
-		return "scale=854:480"
+		return 854, 480, "480p", nil
 	case "240p":
-		return "scale=426:240"
+		return 426, 240, "240p", nil
 	default:
-		return "scale=1920:1080" // Default to 1080p
+		return 0, 0, "", fmt.Errorf("unsupported resolution %q (choose 4k, 1440p, 1080p, 720p, 480p, or 240p)", resolution)
+	}
+}
+
+func getTimelapseCRF(quality string) string {
+	switch quality {
+	case "high":
+		return "18"
+	case "low":
+		return "23"
+	default:
+		return "20"
 	}
 }
 
@@ -374,7 +474,7 @@ func getVideoFilter(resolution string) string {
 func getCodecForFormat(format string) string {
 	switch format {
 	case "mp4":
-		return "libx264-high444"
+		return "libx264"
 	case "mp4-h265":
 		return "libx265"
 	case "3gp":

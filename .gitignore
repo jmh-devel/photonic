@@ -2,7 +2,7 @@
 test-data/
 
 # Build artifacts
-photonic
+/photonic
 
 # Temporary output
 output/

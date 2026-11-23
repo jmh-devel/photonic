@@ -107,6 +107,8 @@ func (r *router) handleTimelapse(ctx context.Context, job Job) Result {
 	stabilize, _ := job.Options["stabilize"].(bool)
 	outputDir, _ := job.Options["outputDir"].(string)
 	resolution, _ := job.Options["resolution"].(string)
+	resolutions, _ := job.Options["resolutions"].([]string)
+	quality, _ := job.Options["quality"].(string)
 	formats, _ := job.Options["formats"].([]string)
 	rawTool, _ := job.Options["rawTool"].(string)
 
@@ -150,23 +152,28 @@ func (r *router) handleTimelapse(ctx context.Context, job Job) Result {
 	}()
 
 	res, err := tasks.BuildTimelapse(ctx, tasks.TimelapseRequest{
-		InputDir:   prepDir,
-		Output:     job.Output,
-		OutputDir:  outputDir,
-		FPS:        fps,
-		Stabilize:  stabilize,
-		Formats:    formats,
-		Resolution: resolution,
+		InputDir:    prepDir,
+		Output:      job.Output,
+		OutputDir:   outputDir,
+		FPS:         fps,
+		Stabilize:   stabilize,
+		Formats:     formats,
+		Resolution:  resolution,
+		Resolutions: resolutions,
+		Quality:     quality,
 	})
 
 	// Build metadata with multiple output files
 	outputFiles := make([]map[string]any, len(res.OutputFiles))
 	for i, file := range res.OutputFiles {
 		outputFiles[i] = map[string]any{
-			"path":   file.Path,
-			"format": file.Format,
-			"codec":  file.Codec,
-			"size":   file.Size,
+			"path":       file.Path,
+			"format":     file.Format,
+			"codec":      file.Codec,
+			"resolution": file.Resolution,
+			"width":      file.Width,
+			"height":     file.Height,
+			"size":       file.Size,
 		}
 	}
 
