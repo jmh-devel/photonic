@@ -320,7 +320,7 @@ func generateTimelapseFormat(ctx context.Context, frames []string, baseOutput, f
 		if err := writeConcatManifest(manifest, frames, fps); err != nil {
 			return OutputFile{}, err
 		}
-		baseArgs = append(baseArgs, "-f", "concat", "-safe", "0", "-i", manifest, "-r", fmt.Sprint(fps), "-vf", fitFilter)
+		baseArgs = append(baseArgs, "-f", "concat", "-safe", "0", "-i", manifest, "-r", fmt.Sprint(fps), "-t", fmt.Sprintf("%.9f", float64(len(frames))/float64(fps)), "-vf", fitFilter)
 	} else {
 		// Mixed formats need separate decoders, as the concat demuxer assumes all
 		// files use the first frame's codec. Pass filenames as argv elements.
@@ -335,7 +335,7 @@ func generateTimelapseFormat(ctx context.Context, frames []string, baseOutput, f
 			concatInputs = append(concatInputs, "["+label+"]")
 		}
 		filterParts = append(filterParts, strings.Join(concatInputs, "")+fmt.Sprintf("concat=n=%d:v=1:a=0[outv]", len(frames)))
-		baseArgs = append(baseArgs, "-filter_complex", strings.Join(filterParts, ";"), "-map", "[outv]", "-r", fmt.Sprint(fps))
+		baseArgs = append(baseArgs, "-filter_complex", strings.Join(filterParts, ";"), "-map", "[outv]", "-r", fmt.Sprint(fps), "-t", fmt.Sprintf("%.9f", float64(len(frames))/float64(fps)))
 	}
 
 	switch format {

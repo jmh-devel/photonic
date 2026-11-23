@@ -91,6 +91,14 @@ func TestBuildTimelapseMixedTIFFJPEGShareSet(t *testing.T) {
 		if got := strings.TrimSpace(string(data)); got != want {
 			t.Errorf("%s dimensions = %q, want %q", file.Path, got, want)
 		}
+		frameProbe := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=nb_frames", "-of", "csv=p=0", file.Path)
+		frameData, err := frameProbe.Output()
+		if err != nil {
+			t.Fatalf("probe frame count for %s: %v", file.Path, err)
+		}
+		if got := strings.TrimSpace(string(frameData)); got != "2" {
+			t.Errorf("%s frame count = %q, want 2", file.Path, got)
+		}
 	}
 
 	// A valid existing 4K render is a suitable source for the 1080p rendition.
