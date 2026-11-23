@@ -93,12 +93,36 @@ func TestBuildTimelapseMixedTIFFJPEGShareSet(t *testing.T) {
 		}
 	}
 
-	tiffOnly := t.TempDir()
-	singleTIFF, err := os.ReadFile(filepath.Join(input, "frame 001.tif"))
+	// A valid existing 4K render is a suitable source for the 1080p rendition.
+	// Corrupting the TIFF after the first render makes any accidental source
+	// reprocessing fail this test.
+	originalTIFF, err := os.ReadFile(filepath.Join(input, "frame 001.tif"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(tiffOnly, "single frame.tif"), singleTIFF, 0o600); err != nil {
+	if err := os.Remove(filepath.Join(output, "timelapse-1080p.mp4")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(input, "frame 001.tif"), []byte("do not decode"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	derived, err := BuildTimelapse(context.Background(), TimelapseRequest{
+		InputDir:    input,
+		OutputDir:   output,
+		FPS:         2,
+		Formats:     []string{"mp4"},
+		Resolutions: []string{"1080p"},
+		Quality:     "low",
+	})
+	if err != nil {
+		t.Fatalf("derive from existing 4K output: %v", err)
+	}
+	if len(derived.OutputFiles) != 1 || derived.OutputFiles[0].Width != 1920 || derived.OutputFiles[0].Height != 1080 {
+		t.Fatalf("unexpected derived rendition: %+v", derived)
+	}
+
+	tiffOnly := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tiffOnly, "single frame.tif"), originalTIFF, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	streamed, err := BuildTimelapse(context.Background(), TimelapseRequest{

@@ -170,7 +170,15 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 	if len(resolutions) == 0 || (len(resolutions) == 1 && resolutions[0] == "") {
 		resolutions = []string{"1080p"}
 	}
+	// Render the largest requested canvas first; smaller outputs can be derived
+	// from it without decoding the full-resolution source frames again.
+	sort.SliceStable(resolutions, func(i, j int) bool {
+		wi, hi, _, _ := resolutionSize(resolutions[i])
+		wj, hj, _, _ := resolutionSize(resolutions[j])
+		return wi*hi > wj*hj
+	})
 	for _, format := range req.Formats {
+		var higher *OutputFile
 		for _, resolution := range resolutions {
 			width, height, canonical, err := resolutionSize(resolution)
 			if err != nil {
@@ -180,12 +188,24 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 			if len(resolutions) > 1 || req.OutputDir != "" {
 				outputBase += "-" + canonical
 			}
-			outputFile, err := generateTimelapseFormat(ctx, processFiles, outputBase, format, req.FPS, canonical, req.Quality, width, height)
+			outputPath := timelapseOutputPath(outputBase, format)
+			outputFile, validExisting := existingTimelapse(outputPath, format, canonical, width, height)
+			if validExisting {
+				logger.Info("reusing existing timelapse rendition", "path", outputPath, "resolution", canonical)
+			} else if higher != nil && width <= higher.Width && height <= higher.Height && (format == "mp4" || format == "mp4-h265") {
+				outputFile, err = deriveTimelapseRendition(ctx, *higher, outputBase, format, req.Quality, width, height, canonical)
+			} else if highPath, highRes, highWidth, highHeight := findHigherTimelapse(baseOutput, format, width, height); highPath != "" && (format == "mp4" || format == "mp4-h265") {
+				higher = &OutputFile{Path: highPath, Format: format, Codec: getCodecForFormat(format), Resolution: highRes, Width: highWidth, Height: highHeight}
+				outputFile, err = deriveTimelapseRendition(ctx, *higher, outputBase, format, req.Quality, width, height, canonical)
+			} else {
+				outputFile, err = generateTimelapseFormat(ctx, processFiles, outputBase, format, req.FPS, canonical, req.Quality, width, height)
+			}
 			if err != nil {
 				logger.Error("failed to generate rendition", "format", format, "resolution", canonical, "error", err)
 				return TimelapseResult{OutputFiles: outputFiles, FrameCount: len(processFiles), UsedFFmpeg: true}, err
 			}
 			outputFiles = append(outputFiles, outputFile)
+			higher = &outputFile
 			logger.Info("generated timelapse rendition successfully", "format", format, "resolution", canonical, "output_file", outputFile.Path, "codec", outputFile.Codec)
 		}
 	}
@@ -200,6 +220,82 @@ func BuildTimelapse(ctx context.Context, req TimelapseRequest) (TimelapseResult,
 		UsedFFmpeg:  true,
 		FrameCount:  len(processFiles),
 	}, nil
+}
+
+func timelapseOutputPath(baseOutput, format string) string {
+	switch format {
+	case "mp4-h265":
+		return baseOutput + "-h265.mp4"
+	case "3gp":
+		return baseOutput + "-compatible.3gp"
+	case "3gp-h264":
+		return baseOutput + "-h264.3gp"
+	case "3gp-mobile":
+		return baseOutput + "-mobile.3gp"
+	case "gif":
+		return baseOutput + ".gif"
+	default:
+		return baseOutput + ".mp4"
+	}
+}
+
+func existingTimelapse(path, format, resolution string, width, height int) (OutputFile, bool) {
+	stat, err := os.Stat(path)
+	if err != nil || !stat.Mode().IsRegular() || stat.Size() == 0 {
+		return OutputFile{}, false
+	}
+	probe, err := exec.Command("ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=s=x:p=0", path).Output()
+	if err != nil {
+		return OutputFile{}, false
+	}
+	var actualWidth, actualHeight int
+	if _, err := fmt.Sscanf(strings.TrimSpace(string(probe)), "%dx%d", &actualWidth, &actualHeight); err != nil || actualWidth != width || actualHeight != height {
+		return OutputFile{}, false
+	}
+	return OutputFile{Path: path, Format: format, Codec: getCodecForFormat(format), Resolution: resolution, Width: width, Height: height, Size: stat.Size()}, true
+}
+
+func findHigherTimelapse(baseOutput, format string, width, height int) (string, string, int, int) {
+	for _, candidate := range []string{"4k", "1440p", "1080p", "720p", "480p", "240p"} {
+		candidateWidth, candidateHeight, canonical, _ := resolutionSize(candidate)
+		if candidateWidth <= width || candidateHeight <= height {
+			continue
+		}
+		path := timelapseOutputPath(baseOutput+"-"+canonical, format)
+		if _, ok := existingTimelapse(path, format, canonical, candidateWidth, candidateHeight); ok {
+			return path, canonical, candidateWidth, candidateHeight
+		}
+	}
+	return "", "", 0, 0
+}
+
+func deriveTimelapseRendition(ctx context.Context, source OutputFile, baseOutput, format, quality string, width, height int, resolution string) (OutputFile, error) {
+	outputPath := timelapseOutputPath(baseOutput, format)
+	if err := backupExistingFile(outputPath); err != nil {
+		return OutputFile{}, fmt.Errorf("backup prior rendition %s: %w", outputPath, err)
+	}
+	args := []string{"-y", "-i", source.Path, "-vf", fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1", width, height), "-an", "-sn", "-dn"}
+	switch format {
+	case "mp4":
+		args = append(args, "-c:v", "libx264", "-profile:v", "high", "-pix_fmt", "yuv420p", "-crf", getTimelapseCRF(quality), "-preset", "slow", "-movflags", "+faststart")
+	case "mp4-h265":
+		args = append(args, "-c:v", "libx265", "-pix_fmt", "yuv420p", "-crf", "28", "-preset", "medium", "-movflags", "+faststart")
+	default:
+		return OutputFile{}, fmt.Errorf("cannot derive %s from a higher-resolution rendition", format)
+	}
+	args = append(args, outputPath)
+	logger := slog.Default()
+	logger.Info("deriving lower-resolution timelapse from existing rendition", "source", source.Path, "source_resolution", source.Resolution, "resolution", resolution, "output_file", outputPath)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return OutputFile{}, fmt.Errorf("derive %s rendition from %s: %w: %s", resolution, source.Path, err, strings.TrimSpace(string(output)))
+	}
+	stat, err := os.Stat(outputPath)
+	if err != nil {
+		return OutputFile{}, err
+	}
+	return OutputFile{Path: outputPath, Format: format, Codec: getCodecForFormat(format), Resolution: resolution, Width: width, Height: height, Size: stat.Size()}, nil
 }
 
 // generateTimelapseFormat creates a single timelapse in the specified format

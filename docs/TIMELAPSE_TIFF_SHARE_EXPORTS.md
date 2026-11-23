@@ -13,7 +13,10 @@ Use `--share-set youtube` to create a 4K UHD and 1080p H.264 MP4 pair in one
 run. Use `--share-set youtube-mobile` to add a 720p rendition. Each output is
 named with its resolution suffix, for example `timelapse-4k.mp4` and
 `timelapse-1080p.mp4`. Existing outputs retain Photonic's timestamped backup
-behavior.
+behavior when a new source render is needed. The highest requested rendition
+is rendered first; lower MP4 renditions are downsampled from that rendered
+video. A valid higher-resolution sibling output can also supply a requested
+lower resolution, avoiding another read of the source frames.
 
 ```sh
 photonic timelapse /path/to/darktable-tiff-frames \
